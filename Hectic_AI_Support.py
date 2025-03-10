@@ -94,29 +94,38 @@ def fetch_tickets():
         return []
 
 
-# 🔹 FUNCTION: AI ANALYSIS (Moved Above `process_tickets()`)
+# 🔹 FUNCTION: AI ANALYSIS 
 def analyze_ticket_with_ai(summary, details):
-    """Analyze ticket details using AI and return structured recommendations."""
+    """Analyze ticket details using AI and return structured recommendations, including status selection."""
 
     client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
-    # Truncate input to avoid exceeding token limits
-    max_summary_length = 1000
-    max_details_length = 3000
+
+   # ✅ Set character limits to prevent exceeding token limits
+    max_summary_length = 1000  # Limit summary to 1000 characters
+    max_details_length = 5000  # Limit details to 5000 characters
+
     summary = summary[:max_summary_length] + "..." if len(summary) > max_summary_length else summary
     details = details[:max_details_length] + "..." if len(details) > max_details_length else details
 
+
     prompt = f"""
-    You are an AI support assistant. Given the following IT support ticket, analyze it and determine:
+    You are an AI support assistant for a Managed Service Provider (MSP). Given the following IT support ticket, determine:
     - Urgency: Low, Medium, or High
     - Impact: No impact, Moderate, or High impact
     - Suggested Ticket Type: Incident, Service Request, or Other
     - Assignment: Should it be assigned to an AI bot or a human?
-
+    - Ideal ticket status based on context:
+        - "In Progress" (ID: 2) if work is ongoing.
+        - "Awaiting Approval" (ID: 17) if waiting for user input.
+        - "On Hold" (ID: 21) if pending a response from an external party.
+        - "Escalated" (ID: 29) if urgent and needs immediate attention.
+        - "Closed" (ID: 9) if the AI has resolved the issue.
+    
     Ticket Summary: {summary}
     Ticket Details: {details}
 
-    Provide the output in JSON format with keys: urgency, impact, ticket_type, assign_to, reasoning.
+    Provide the output in JSON format with keys: urgency, impact, ticket_type, assign_to, status_id, requires_human, reasoning.
     """
 
     try:
@@ -138,6 +147,8 @@ def analyze_ticket_with_ai(summary, details):
         return None
 
 
+
+
 # 🔹 FUNCTION: PROCESS TICKETS
 def process_tickets(tickets):
     """Process and update tickets with AI-generated reasoning."""
@@ -156,8 +167,12 @@ def process_tickets(tickets):
         if not ai_recommendation:
             continue
 
+        status_id = ai_recommendation.get("status_id", 2)  # Default to "In Progress"
         update_ticket(ticket_id, ai_recommendation["urgency"], ai_recommendation["impact"],
-                      ai_recommendation["ticket_type"], ai_recommendation["assign_to"], ai_recommendation["reasoning"])
+                      ai_recommendation["ticket_type"], ai_recommendation["assign_to"],
+                      ai_recommendation["reasoning"], status_id)
+
+
 
 # 🔹 FUNCTION: Update Ticket Status
 def update_ticket_status(ticket_id, new_status_id):
@@ -234,18 +249,16 @@ def add_ticket_note(ticket_id, assign_to, ai_notes):
         print(f"❌ Failed to Add AI Note. Status Code: {action_response.status_code}, Response: {action_response.text}")
 
 ### ✅ 3️⃣ Function to Process Ticket Updates ###
-def update_ticket(ticket_id, urgency, impact, ticket_type, assign_to, ai_notes):
-    """Update a ticket: Move to 'In Progress' and add an AI-generated note."""
-    
-    # Step 1: Move Ticket to 'In Progress' with correct status_id
-    if update_ticket_status(ticket_id, 2):  # ✅ Pass '2' as the new_status_id
+
+def update_ticket(ticket_id, urgency, impact, ticket_type, assign_to, ai_notes, status_id):
+    """Update a ticket: Move to the AI-selected status and add an AI-generated note."""
+
+    print(f"📤 AI has determined the best status for Ticket #{ticket_id}: {status_id}")
+
+    # Step 1: Move Ticket to the AI-Recommended Status
+    if update_ticket_status(ticket_id, status_id):
         # Step 2: Add AI-generated note only if the status update was successful
         add_ticket_note(ticket_id, assign_to, ai_notes)
-
-
-
-
-
 
 
 
