@@ -6,7 +6,8 @@ import chromadb
 import difflib
 from crewai import Agent, Task, Crew
 from langchain.tools import Tool
-from openai import OpenAI
+from datetime import datetime
+import openai 
 
 # 🔒 Secure API Credentials (Use environment variables)
 HALO_PSA_CLIENT_ID = os.getenv("HALO_PSA_CLIENT_ID")
@@ -94,17 +95,22 @@ def fetch_tickets():
         return []
 
 
-def fetch_categories():
-    """Retrieve categories from HaloPSA API and store them in a dictionary."""
-    headers = {"Authorization": f"Bearer {get_access_token()}", "Content-Type": "application/json"}
-    response = requests.get(CATEGORY_URL, headers=headers)
-
-    if response.status_code == 200:
-        categories = response.json()
-        return {cat["name"]: cat["id"] for cat in categories}
-    else:
-        print(f"❌ Failed to fetch categories: {response.text}")
-        return {}
+#def fetch_categories():
+#    """Retrieve categories from HaloPSA API using the correct endpoint."""
+#    headers = {"Authorization": f"Bearer {get_access_token()}", "Content-Type": "application/json"}
+#    category_url = f"{CATEGORY_URL}?showall=true&type_id=1"  # Ensure the correct type_id is used
+#
+#    response = requests.get(category_url, headers=headers)
+#
+#    if response.status_code == 200:
+#        categories = response.json()
+#        category_dict = {cat["name"]: cat["id"] for cat in categories}
+#
+#        print(f"✅ Retrieved {len(category_dict)} categories.")
+#        return category_dict
+#    else:
+#        print(f"❌ Failed to fetch categories. Status Code: {response.status_code}, Response: {response.text}")
+#        return {}
 
 
 def find_best_category(ticket_summary, categories_dict):
@@ -118,47 +124,100 @@ def find_best_category(ticket_summary, categories_dict):
     return categories_dict[best_match[0]] if best_match else None
 
 
-def update_ticket(ticket_id, ticket_summary, urgency, impact, ticket_type, assign_to, ai_notes):
-    """Update a ticket in HaloPSA with AI-selected category and add an AI note."""
-    headers = {"Authorization": f"Bearer {get_access_token()}", "Content-Type": "application/json"}
 
-    categories_dict = fetch_categories()
-    category_id = find_best_category(ticket_summary, categories_dict) or 137  # Default category
-
-    ticket_update_payload = {
-        "categoryid_1": category_id,
-        "urgency": {"Low": 1, "Medium": 2, "High": 3}.get(urgency, 2),
-        "impact": {"No impact": 1, "Moderate": 2, "High impact": 3}.get(impact, 2),
-        "type": ticket_type,
-        "assigned_to": assign_to,
-        "status_id": 2
+def update_ticket(ticket_id, ai_notes):
+    """Add an AI-generated private note to a ticket in HaloPSA."""
+    headers = {
+        "Authorization": f"Bearer {get_access_token()}",
+        "Content-Type": "application/json"
     }
 
-    print(f"📤 Updating Ticket #{ticket_id} with category {category_id}")
-    update_response = requests.patch(f"{TICKET_URL}/{ticket_id}", json=ticket_update_payload, headers=headers)
+    # Create timestamp in correct format
+    timestamp = datetime.utcnow().isoformat() + "Z"
 
-    if update_response.status_code in [200, 201]:
-        print(f"✅ Updated Ticket #{ticket_id}")
-    else:
-        print(f"❌ Update Failed: {update_response.text}")
-        return False
-
-    action_payload = [{
+    # Payload to add an action (note)
+    note_payload = [{
         "ticket_id": ticket_id,
         "outcome": "Private Note",
         "who": "AI Support Bot",
         "who_type": 1,
-        "note": f"AI Analysis:\n{ai_notes}\n\n(Ticket moved to 'In Progress' by AI.)",
-        "visibility": "private"
+        "who_agentid": 3,  # Replace with correct agent ID if needed
+        "datetime": timestamp,
+        "note": f"AI Analysis:\n{ai_notes}\n\n(Ticket updated by AI.)",
+        "visibility": "private",
+        "actionby_agent_id": 3,  # Ensure this is the correct agent ID
+        "actiondatecreated": timestamp,
+        "actioncompletiondate": timestamp,
+        "actionarrivaldate": timestamp
     }]
 
     print(f"📤 Adding AI Note to Ticket #{ticket_id}")
-    action_response = requests.post(ACTION_URL, json=action_payload, headers=headers)
 
-    if action_response.status_code in [200, 201]:
+    note_response = requests.post(
+        f"{HALO_PSA_BASE_URL}/api/Actions",  # Ensure the correct API version
+        json=note_payload,
+        headers=headers
+    )
+
+    if note_response.status_code in [200, 201]:
         print(f"✅ AI Note Added to Ticket #{ticket_id}")
     else:
-        print(f"❌ Failed to Add AI Note: {action_response.text}")
+        print(f"❌ Failed to Add AI Note. Status Code: {note_response.status_code}, Response: {note_response.text}")
+
+
+
+
+def analyze_ticket_with_ai(summary, details):
+    """Analyze ticket details using AI and return structured recommendations."""
+
+    # ✅ Ensure OpenAI API key is set
+    client = openai.OpenAI(api_key=OPENAI_API_KEY)
+
+    # ✅ Truncate input if necessary to avoid exceeding token limits
+    max_summary_length = 1000  
+    max_details_length = 3000  
+
+    summary = summary[:max_summary_length] + "..." if len(summary) > max_summary_length else summary
+    details = details[:max_details_length] + "..." if len(details) > max_details_length else details
+
+    prompt = f"""
+    You are an AI support assistant. Given the following IT support ticket, analyze it and determine:
+    - Urgency: Low, Medium, or High
+    - Impact: No impact, Moderate, or High impact
+    - Suggested Ticket Type: Incident, Service Request, or Other
+    - Assignment: Should it be assigned to an AI bot or a human?
+
+    Ticket Summary: {summary}
+    Ticket Details: {details}
+
+    Provide the output in JSON format with keys: urgency, impact, ticket_type, assign_to, reasoning.
+    """
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are a helpful AI support assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=500,
+            temperature=0.5
+        )
+
+        ai_output = response.choices[0].message.content.strip()
+        structured_output = json.loads(ai_output)
+
+        return structured_output
+
+    except Exception as e:
+        print(f"❌ AI Analysis Error: {e}")
+        return None
+
+
+
+
+
+
 
 
 def process_tickets(tickets):
@@ -181,14 +240,8 @@ def process_tickets(tickets):
             print(f"⚠️ AI analysis failed for Ticket #{ticket_id}, skipping.")
             continue
 
-        update_ticket(
-            ticket_id, summary,
-            ai_recommendation["urgency"],
-            ai_recommendation["impact"],
-            ai_recommendation["ticket_type"],
-            ai_recommendation["assign_to"],
-            ai_recommendation["reasoning"]
-        )
+        update_ticket(ticket_id, ai_recommendation["reasoning"])
+
 
     print("🚀 AI Processing complete.")
 
