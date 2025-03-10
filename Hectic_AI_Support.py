@@ -4,12 +4,10 @@ import json
 import time
 import chromadb
 import difflib
-from crewai import Agent, Task, Crew
-from langchain.tools import Tool
-from datetime import datetime
-import openai 
+from datetime import datetime, timezone
+import openai
 
-# 🔒 Secure API Credentials (Use environment variables)
+# 🔒 Secure API Credentials
 HALO_PSA_CLIENT_ID = os.getenv("HALO_PSA_CLIENT_ID")
 HALO_PSA_CLIENT_SECRET = os.getenv("HALO_PSA_CLIENT_SECRET")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -18,7 +16,6 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 HALO_PSA_BASE_URL = "https://opendoormsp.halopsa.com"
 TOKEN_URL = f"{HALO_PSA_BASE_URL}/auth/token"
 TICKET_URL = f"{HALO_PSA_BASE_URL}/api/tickets"
-CATEGORY_URL = f"{HALO_PSA_BASE_URL}/api/categories"
 ACTION_URL = f"{HALO_PSA_BASE_URL}/api/actions"
 
 # 🔑 Token Storage
@@ -30,6 +27,7 @@ chroma_client = chromadb.PersistentClient(path="./chroma_db")
 ticket_collection = chroma_client.get_or_create_collection("tickets")
 
 
+# 🔹 FUNCTION: GET ACCESS TOKEN
 def get_access_token():
     """Retrieve a new HaloPSA API token if expired."""
     global ACCESS_TOKEN, TOKEN_EXPIRATION
@@ -58,6 +56,7 @@ def get_access_token():
         raise Exception("Failed to retrieve access token")
 
 
+# 🔹 FUNCTION: FETCH TICKETS
 def fetch_tickets():
     """Fetch only 'New' tickets from HaloPSA and store them in ChromaDB."""
     headers = {"Authorization": f"Bearer {get_access_token()}"}
@@ -95,88 +94,15 @@ def fetch_tickets():
         return []
 
 
-#def fetch_categories():
-#    """Retrieve categories from HaloPSA API using the correct endpoint."""
-#    headers = {"Authorization": f"Bearer {get_access_token()}", "Content-Type": "application/json"}
-#    category_url = f"{CATEGORY_URL}?showall=true&type_id=1"  # Ensure the correct type_id is used
-#
-#    response = requests.get(category_url, headers=headers)
-#
-#    if response.status_code == 200:
-#        categories = response.json()
-#        category_dict = {cat["name"]: cat["id"] for cat in categories}
-#
-#        print(f"✅ Retrieved {len(category_dict)} categories.")
-#        return category_dict
-#    else:
-#        print(f"❌ Failed to fetch categories. Status Code: {response.status_code}, Response: {response.text}")
-#        return {}
-
-
-def find_best_category(ticket_summary, categories_dict):
-    """Find the best category using fuzzy matching."""
-    if not categories_dict:
-        return None
-
-    category_names = list(categories_dict.keys())
-    best_match = difflib.get_close_matches(ticket_summary, category_names, n=1, cutoff=0.3)
-
-    return categories_dict[best_match[0]] if best_match else None
-
-
-
-def update_ticket(ticket_id, ai_notes):
-    """Add an AI-generated private note to a ticket in HaloPSA."""
-    headers = {
-        "Authorization": f"Bearer {get_access_token()}",
-        "Content-Type": "application/json"
-    }
-
-    # Create timestamp in correct format
-    timestamp = datetime.utcnow().isoformat() + "Z"
-
-    # Payload to add an action (note)
-    note_payload = [{
-        "ticket_id": ticket_id,
-        "outcome": "Private Note",
-        "who": "AI Support Bot",
-        "who_type": 1,
-        "who_agentid": 3,  # Replace with correct agent ID if needed
-        "datetime": timestamp,
-        "note": f"AI Analysis:\n{ai_notes}\n\n(Ticket updated by AI.)",
-        "visibility": "private",
-        "actionby_agent_id": 3,  # Ensure this is the correct agent ID
-        "actiondatecreated": timestamp,
-        "actioncompletiondate": timestamp,
-        "actionarrivaldate": timestamp
-    }]
-
-    print(f"📤 Adding AI Note to Ticket #{ticket_id}")
-
-    note_response = requests.post(
-        f"{HALO_PSA_BASE_URL}/api/Actions",  # Ensure the correct API version
-        json=note_payload,
-        headers=headers
-    )
-
-    if note_response.status_code in [200, 201]:
-        print(f"✅ AI Note Added to Ticket #{ticket_id}")
-    else:
-        print(f"❌ Failed to Add AI Note. Status Code: {note_response.status_code}, Response: {note_response.text}")
-
-
-
-
+# 🔹 FUNCTION: AI ANALYSIS (Moved Above `process_tickets()`)
 def analyze_ticket_with_ai(summary, details):
     """Analyze ticket details using AI and return structured recommendations."""
 
-    # ✅ Ensure OpenAI API key is set
     client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
-    # ✅ Truncate input if necessary to avoid exceeding token limits
-    max_summary_length = 1000  
-    max_details_length = 3000  
-
+    # Truncate input to avoid exceeding token limits
+    max_summary_length = 1000
+    max_details_length = 3000
     summary = summary[:max_summary_length] + "..." if len(summary) > max_summary_length else summary
     details = details[:max_details_length] + "..." if len(details) > max_details_length else details
 
@@ -196,10 +122,8 @@ def analyze_ticket_with_ai(summary, details):
     try:
         response = client.chat.completions.create(
             model="gpt-4",
-            messages=[
-                {"role": "system", "content": "You are a helpful AI support assistant."},
-                {"role": "user", "content": prompt}
-            ],
+            messages=[{"role": "system", "content": "You are a helpful AI support assistant."},
+                      {"role": "user", "content": prompt}],
             max_tokens=500,
             temperature=0.5
         )
@@ -214,38 +138,118 @@ def analyze_ticket_with_ai(summary, details):
         return None
 
 
-
-
-
-
-
-
+# 🔹 FUNCTION: PROCESS TICKETS
 def process_tickets(tickets):
     """Process and update tickets with AI-generated reasoning."""
     if not tickets:
         print("✅ No new tickets to process.")
         return
 
-    print(f"🚀 Processing {len(tickets)} tickets...")
-
     for ticket in tickets:
-        ticket_id = ticket.get("id")
+        ticket_id = ticket["id"]
         summary = ticket.get("summary", "No Summary")
         details = ticket.get("details", "No Details")
 
-        print(f"\n📌 **Processing Ticket #{ticket_id}**")
+        print(f"\n📌 Processing Ticket #{ticket_id}")
 
         ai_recommendation = analyze_ticket_with_ai(summary, details)
         if not ai_recommendation:
-            print(f"⚠️ AI analysis failed for Ticket #{ticket_id}, skipping.")
             continue
 
-        update_ticket(ticket_id, ai_recommendation["reasoning"])
+        update_ticket(ticket_id, ai_recommendation["urgency"], ai_recommendation["impact"],
+                      ai_recommendation["ticket_type"], ai_recommendation["assign_to"], ai_recommendation["reasoning"])
+
+# 🔹 FUNCTION: Update Ticket Status
+def update_ticket_status(ticket_id, new_status_id):
+    """Update the status of a HaloPSA ticket using POST."""
+    headers = {
+        "Authorization": f"Bearer {get_access_token()}",
+        "Content-Type": "application/json"
+    }
+    payload = [
+        {
+            "id": ticket_id,
+            "status_id": new_status_id
+        }
+    ]
+
+    print(f"📤 Moving Ticket #{ticket_id} to 'In Progress' using POST.")
+
+    response = requests.post(  # ✅ Changed from PUT to POST
+        "https://opendoormsp.halopsa.com/api/tickets",  # ✅ Correct endpoint
+        json=payload,
+        headers=headers
+    )
+
+    if response.status_code in [200, 201]:
+        print(f"✅ Ticket #{ticket_id} successfully updated to status ID {new_status_id}.")
+        return True
+    else:
+        print(f"❌ Failed to update ticket #{ticket_id}. Status Code: {response.status_code}, Response: {response.text}")
+        return False
 
 
-    print("🚀 AI Processing complete.")
+### ✅ 2️⃣ Function to Add AI Note ###
+def add_ticket_note(ticket_id, assign_to, ai_notes):
+    """Add an AI-generated private note to a HaloPSA ticket."""
+    headers = {
+        "Authorization": f"Bearer {get_access_token()}",
+        "Content-Type": "application/json"
+    }
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    # Ensure assigned agent ID is an integer
+    try:
+        assign_to = int(assign_to)
+    except ValueError:
+        print(f"⚠️ Invalid agent ID provided: {assign_to}. Defaulting to AI bot agent ID (1).")
+        assign_to = 1  # Set to default AI agent ID (update with the correct ID)
+
+    action_payload = [{
+        "ticket_id": ticket_id,
+        "outcome": "Private Note",
+        "who": "AI Support Bot",
+        "who_type": 1,
+        "who_agentid": assign_to,  # Assign the agent
+        "datetime": timestamp,
+        "note": f"AI Analysis:\n{ai_notes}\n\n(Ticket moved to 'In Progress' by AI.)",
+        "visibility": "private",
+        "actionby_agent_id": assign_to,  # Assign agent in action
+        "actiondatecreated": timestamp,
+        "actioncompletiondate": timestamp,
+        "actionarrivaldate": timestamp
+    }]
+
+    print(f"📤 Adding AI Note to Ticket #{ticket_id}")
+
+    action_response = requests.post(
+        ACTION_URL,  # ✅ Correct API for adding notes
+        json=action_payload,
+        headers=headers
+    )
+
+    if action_response.status_code in [200, 201]:
+        print(f"✅ AI Note Added to Ticket #{ticket_id}")
+    else:
+        print(f"❌ Failed to Add AI Note. Status Code: {action_response.status_code}, Response: {action_response.text}")
+
+### ✅ 3️⃣ Function to Process Ticket Updates ###
+def update_ticket(ticket_id, urgency, impact, ticket_type, assign_to, ai_notes):
+    """Update a ticket: Move to 'In Progress' and add an AI-generated note."""
+    
+    # Step 1: Move Ticket to 'In Progress' with correct status_id
+    if update_ticket_status(ticket_id, 2):  # ✅ Pass '2' as the new_status_id
+        # Step 2: Add AI-generated note only if the status update was successful
+        add_ticket_note(ticket_id, assign_to, ai_notes)
 
 
+
+
+
+
+
+
+# 🔹 MAIN EXECUTION
 if __name__ == "__main__":
     print("\n🚀 Starting AI Ticket Triage and Analysis\n")
     process_tickets(fetch_tickets())
